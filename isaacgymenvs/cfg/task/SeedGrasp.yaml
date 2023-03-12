@@ -28,7 +28,7 @@ env:
   liftRewardScale: 15.0
   fingertipDistanceScale: 10.0
   liftHeightRewardScale: 15.0
-  actionsRegularizationRewardScale: -0.01
+  actionsRegularizationRewardScale: 0.0
 
   armControlType: osc  # options are {osc, pos}
   handControlType: binary # options are {binary, synergy, pos}
