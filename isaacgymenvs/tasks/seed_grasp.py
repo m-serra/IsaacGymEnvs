@@ -131,13 +131,6 @@ class SeedGrasp(VecTask):
         # Refresh tensors
         self._refresh()
 
-        self.dist_rewards = []
-        self.rot_rewards = []
-        self.lift_rewards = []
-        self.fintip_rewards = []
-        self.actions_list = []
-        self.fig, self.ax = plt.subplots()
-
     def create_sim(self):
         self.sim_params.up_axis = gymapi.UP_AXIS_Z
         self.sim_params.gravity.x = 0
@@ -160,7 +153,7 @@ class SeedGrasp(VecTask):
         asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets")
         robot_asset_file = "urdf/seed_kinova_robot/seed_kinova.urdf"
 
-        # load franka asset
+        # load robot asset
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = True
         asset_options.collapse_fixed_joints = False
