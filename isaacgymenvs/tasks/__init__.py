@@ -48,6 +48,7 @@ from .allegro_hand import AllegroHand
 from .trifinger import Trifinger
 from .seed_grasp import SeedGrasp
 from .task_grasp import TaskGrasp
+from .qbhand_grasp import SoftGrasp
 
 # Mappings from strings to environments
 isaacgym_task_map = {
@@ -72,4 +73,5 @@ isaacgym_task_map = {
     "Trifinger": Trifinger,
     "SeedGrasp": SeedGrasp,
     "TaskGrasp": TaskGrasp,
+    "SoftGrasp": SoftGrasp,
 }
