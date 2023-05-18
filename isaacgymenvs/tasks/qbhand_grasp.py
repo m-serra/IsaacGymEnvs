@@ -548,7 +548,7 @@ def compute_robot_reward(
 
     # distance from grasp link to the object
     d_eef = torch.norm(states["object_pos_relative"], dim=-1)
-    dist_reward = 1 - torch.tanh(2 * d_eef)
+    dist_reward = 1 - torch.tanh(5 * d_eef)
 
     # distance from fingertips to the object
     d_fftip = torch.norm(states["fftip_pos"] - states["object_pos"], dim=-1)
@@ -574,7 +574,7 @@ def compute_robot_reward(
             + reward_settings["r_fintip_scale"] * fintip_reward \
             + reward_settings["r_lift_scale"] * lift_reward \
             + reward_settings["r_lift_height_scale"] * lift_height \
-            + reward_settings["r_actions_reg_scale"] * action_penalty
+            # + reward_settings["r_actions_reg_scale"] * action_penalty
 
     # Compute resets
     # reset_buf = torch.where((progress_buf >= max_episode_length - 1) | (lift_reward > 0), torch.ones_like(reset_buf), reset_buf)

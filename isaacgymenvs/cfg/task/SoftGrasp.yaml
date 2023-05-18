@@ -24,8 +24,8 @@ env:
   actionScale: 1.0
   distRewardScale: 1.5
   rotationRewardScale: 0.2
-  fingertipRewardScale: 2.5
   liftRewardScale: 15.0
+  fingertipRewardScale: 1.5
   fingertipDistanceScale: 10.0
   liftHeightRewardScale: 15.0
   actionsRegularizationRewardScale: 0.0
