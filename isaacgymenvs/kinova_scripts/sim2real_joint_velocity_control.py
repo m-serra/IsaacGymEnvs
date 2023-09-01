@@ -71,7 +71,7 @@ def setup_sim():
 
     return gym, sim, viewer, env
 
-def load_hand():
+def load_hand(gym, sim, env):
     # add hand urdf asset
     asset_root = "urdf"
     asset_file = "kinova.urdf"
@@ -103,7 +103,7 @@ def load_hand():
 
     return hand, hand_asset
 
-def set_actor_properties(hand):
+def set_actor_properties(hand, gym, env):
     # Configure DOF properties
     props = gym.get_actor_dof_properties(env, hand)
     props["driveMode"].fill(gymapi.DOF_MODE_POS)
@@ -116,7 +116,7 @@ def set_actor_properties(hand):
     gym.set_actor_dof_properties(env, hand, props)
     return len(props)
 
-def set_hand_joint_positions(joint_positions, hand_handle):
+def set_hand_joint_positions(joint_positions, hand_handle, gym, env):
     hand_dof_states = gym.get_actor_dof_states(env, hand_handle, gymapi.STATE_POS)
 
     for j in range(len(hand_dof_states['pos'])):
@@ -125,7 +125,7 @@ def set_hand_joint_positions(joint_positions, hand_handle):
     gym.set_actor_dof_states(env, hand_handle, hand_dof_states, gymapi.STATE_POS)
     gym.set_actor_dof_position_targets(env, hand_handle, joint_positions)
 
-def set_hand_joint_target_positions(joint_positions, hand_handle):
+def set_hand_joint_target_positions(joint_positions, hand_handle, gym, env):
     gym.set_actor_dof_position_targets(env, hand_handle, joint_positions)
 
 def remap(value, low1=-math.pi, high1=math.pi, low2=-180, high2=180):
@@ -174,26 +174,22 @@ def real2sim_joints(real_angles):
     return sim_angles
 
 def shift_angle(angle, shift):
+    """
+    To use for bounded joints.
+    These joints operate in angles centered at 0/360 (e.g. 280 to 70)
+    This makes computing difference between angles tricky, so this function
+    rotates all angles so that the bounds don't cross the 0 to 360 frontier. 
+    """
     if angle <= shift:
-        return angle + shift
+        # return angle + shift
+        return (angle + shift) % 360
     elif angle >= (360-shift):
-        return (angle - (360-shift)) # % shift
-    print("else")
-    exit(0)
-
+        return angle - (360-shift)
+        return (angle - (360-shift)) % 360
+    exit(0) # if it get's here there's a bug
 
 def get_direction_and_refine_target_bounded(current_angle, target_angle, angle_width):
-    # 0: [-math.pi, math.pi, -180, 180],
-    # 1: [-2.41, 2.41, -128.93, 128.93],
-    # 2: [-math.pi, math.pi, -180, 180],
-    # 3: [-2.66, 2.66, -147.83, 147.83],
-    # 4: [-math.pi, math.pi, -180, 180],
-    # 5: [-2.23, 2.23, -120.32, 120.32],
-    # 6: [-math.pi, math.pi, -180, 180]]
 
-    """
-    
-    """
     if target_angle == 0:
         if current_angle >= (360 - angle_width):
             direction = 1
@@ -207,11 +203,11 @@ def get_direction_and_refine_target_bounded(current_angle, target_angle, angle_w
         else:
             direction = 1
     else:
-        print("Current_angle:", current_angle)
+        # print("Current_angle:", current_angle)
         current_shifted = shift_angle(current_angle, angle_width)
-        print("Current shifted:", current_shifted)
+        # print("Current shifted:", current_shifted)
         target_shifted = shift_angle(target_angle, angle_width)
-        print("Target shifted:", target_shifted)
+        # print("Target shifted:", target_shifted)
         diff = current_shifted - target_shifted
         direction = -1 if diff >= 0 else 1
         
@@ -251,117 +247,148 @@ def get_direction_and_refine_target_360(current_angle, target_angle):
             direction = -1
     return direction, target_angle
 
-gym, sim, viewer, env = setup_sim()
 
-hand_handle, hand_asset = load_hand()
-
-real_arm = KinovaArm()
-
-# =====
-# Snippet to get new target positions from the real arm (comment after using)
-# real_angles = real_arm.get_joint_angles()
-# print("Real angles:", real_angles)
-# target_angles = real2sim_joints(torch.tensor(real_angles))
-# print("Target angles:", target_angles)
-# exit()
-# =====
-
-# Target joint angles: fixed simulated arm pose
-arm_control = [0.] * 7
-arm_control = [0.0, 0.247, math.pi, -2.263, 0., 0.967, 1.57]
-arm_control = [-0.6739,  0.7431, -0.0231,  1.2184, -0.4662,  1.1644,  0.4668]
-arm_control = [0.0,  0.28043, -math.pi, -2.3393, 0.0, 1.0193,  1.57]  # home position
-arm_control = [0.0,  0.28043, -math.pi, -2.3393, 0.0, 1.0193,  0.0]
-joint_positions = arm_control
-set_hand_joint_positions(joint_positions, hand_handle)
-
-gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_X, "x")
+def compute_true_angle_diff(current_angle, target_angle):
+    """
+    Compute angle difference discounting crossing 0/360
+    E.g.: Difference between 5deg and 355deg should be 10def, not 350deg.
+    """
+    return abs(shift_angle(current_angle, shift=180) - shift_angle(target_angle, shift=180)), direction
 
 
-handles = {"eef": gym.find_actor_rigid_body_handle(env, hand_handle, "eef")}
-_rigid_body_state_tensor = gym.acquire_rigid_body_state_tensor(sim)
-_rigid_body_state = gymtorch.wrap_tensor(_rigid_body_state_tensor).view(1, -1, 13)
-_eef_pos = _rigid_body_state[:, handles["eef"], :3]
-_eef_rot = _rigid_body_state[:, handles["eef"], 3:7]
+def main():
+    gym, sim, viewer, env = setup_sim()
 
-execute = False
+    hand_handle, hand_asset = load_hand(gym, sim, env)
+
+    real_arm = KinovaArm()
+
+    # =====
+    # Snippet to get new target positions from the real arm (comment after using)
+    # real_angles = real_arm.get_joint_angles()
+    # print("Real angles:", real_angles)
+    # target_angles = real2sim_joints(torch.tensor(real_angles))
+    # print("Target angles:", target_angles)
+    # exit()
+    # =====
+
+    # Target joint angles: fixed simulated arm pose
+    arm_control = [0.0, 0.247, math.pi, -2.263, 0., 0.967, 1.57]
+    arm_control = [-0.6739,  0.7431, -0.0231,  1.2184, -0.4662,  1.1644,  0.4668]
+    arm_control = [0.0,  0.28043, -math.pi, -2.3393, 0.0, 1.0193,  0.0]
+    arm_control = [0.0,  0.28043, -math.pi, -2.3393, 0.0, 1.0193,  1.57]  # home position
+    arm_control = [0.] * 7
+    joint_positions = arm_control
+    set_hand_joint_positions(joint_positions, hand_handle, gym, env)
 
 
-joint_positions = torch.tensor(real_arm.get_joint_angles())
+    gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_X, "x")
 
-while not gym.query_viewer_has_closed(viewer):
-    for evt in gym.query_viewer_action_events(viewer):
-        if evt.action == "x" and evt.value > 0:
-            execute = not execute
-            # execute = True
+
+    handles = {"eef": gym.find_actor_rigid_body_handle(env, hand_handle, "eef")}
+    _rigid_body_state_tensor = gym.acquire_rigid_body_state_tensor(sim)
+    _rigid_body_state = gymtorch.wrap_tensor(_rigid_body_state_tensor).view(1, -1, 13)
+    _eef_pos = _rigid_body_state[:, handles["eef"], :3]
+    _eef_rot = _rigid_body_state[:, handles["eef"], 3:7]
+
+
+
+    # joint_positions = torch.tensor(real_arm.get_joint_angles())
+    execute = False
+    real_arm.home()
+    # joint_positions = sim2real_joints(torch.tensor(arm_control))
+
+    joint_idx = int(input("Select joint to test: "))
     
-    if execute:
+    while not gym.query_viewer_has_closed(viewer):
+        for evt in gym.query_viewer_action_events(viewer):
+            if evt.action == "x" and evt.value > 0:
+                execute = not execute
+            execute = True
         
-        joint_positions = joint_positions.cpu().numpy()
-        joint_idx = 1
-        joint_positions[joint_idx] = 270.0
-        
-        initial_diffs = abs(joint_positions - real_arm.get_joint_angles())
-        max_speed = 40  # deg/sec
-        stop_condition = .02  # difference in deg between target & real
-        factor = np.zeros(real_arm.num_joints)
-        angle_width = [360, 128.93, 360, 147.83, 360, 120.32, 360]
-
-        # TODO: 
-        # - choose direction that leads to the shortest movement.
-        # - Fix factor computation
-        # - Assert target angles have been converted to correct range
-        # - Write get_closes_direction function for joints that are not 360
-
-        # While any of the joint angle errors is above the stop condition
-        while np.sum(abs(joint_positions - real_arm.get_joint_angles()) > stop_condition) != 0:
+        if execute:
             
-            # Angles in [0:360] with transition at 9 o'clock
-            real_joint_angles = real_arm.get_joint_angles()  # repeated call...
-            print("Real angle:", real_joint_angles[joint_idx])
+            # joint_positions = joint_positions.cpu().numpy()
+            # joint_idx = 0
+            input_idx = input("Select joint to test (default: previous): ")
+            try:
+                joint_idx = int(input_idx)
+            except:
+                pass
+            joint_positions = np.array(real_arm.get_joint_angles())
+            print("Current_angle: ", joint_positions[joint_idx])
+            angle = float(input("Select target angle: "))
+            print("\n")
+            joint_positions[joint_idx] = angle
             
-            current_diffs = abs(joint_positions - real_joint_angles)
-            print("Current_difs:", current_diffs[joint_idx])
-            
-            speeds = np.zeros(7)
+            max_speed = 40  # deg/sec
+            stop_condition = 0.05 # 0.02  # difference in deg between target & real
+            angle_width = [360, 128.93, 360, 147.83, 360, 120.32, 360]
 
-            # Make smoother function for the factor
-            for i in range(real_arm.num_joints):
+            # TODO: 
+            # - Assert target angles have been converted to correct range
 
-                if i != joint_idx:  # safety guard to move only one joint during development
-                    continue
-                target_angle = center_angles_at_360(joint_positions[i])
+            # While any of the joint angle errors is above the stop condition
+            while np.sum(abs(joint_positions - real_arm.get_joint_angles()) > stop_condition) != 0:
                 
-                if angle_width[i] == 360:
-                    direction, joint_positions[i] = get_direction_and_refine_target_360(real_joint_angles[i], target_angle)
-                else:
-                    direction, joint_positions[i] = get_direction_and_refine_target_bounded(real_joint_angles[i], target_angle, angle_width[i])
+                # Angles in [0:360] with transition at 9 o'clock
+                real_joint_angles = real_arm.get_joint_angles()  # repeated call...
+                # print("Real angle:", real_joint_angles[joint_idx])
+                
+                # current_diffs = abs(joint_positions - real_joint_angles)
+                # print("Current_difs:", current_diffs[joint_idx])
+                
+                current_diffs = [compute_true_angle_diff(joint_positions[i], real_joint_angles[i])for i in range(real_arm.num_joints)]
+                speeds = np.zeros(7)
 
-                if current_diffs[i] > max_speed:
-                    speeds[i] = direction * max_speed
-                else:
-                    speeds[i] = direction * current_diffs[i]
+                for i in range(real_arm.num_joints):
 
-            print("Speed", speeds[joint_idx], "\n")
-            real_arm.send_joint_speeds(speeds)
+                    # if i != joint_idx:  # safety guard to move only one joint during development
+                    #     continue
 
-        break
-    
+                    target_angle = center_angles_at_360(joint_positions[i])
+                    
+                    if angle_width[i] == 360:
+                        direction, joint_positions[i] = get_direction_and_refine_target_360(real_joint_angles[i], target_angle)
+                    else:
+                        direction, joint_positions[i] = get_direction_and_refine_target_bounded(real_joint_angles[i], target_angle, angle_width[i])
 
-    # step the physics
-    gym.simulate(sim)
-    gym.fetch_results(sim, True)
+                    if current_diffs[i] <= stop_condition:
+                        speeds[i] = 0.0
+                    elif current_diffs[i] > max_speed:
+                        speeds[i] = direction * max_speed
+                    else:
+                        speeds[i] = direction * current_diffs[i]
 
-    # update the viewer
-    gym.step_graphics(sim)
-    gym.draw_viewer(viewer, sim, True)
+                print("Error:", current_diffs)
+                # print("Error:", current_diffs[joint_idx])
+                # print("Speed", speeds, "\n")
+                print("Speed", speeds[joint_idx], "\n")
+                real_arm.send_joint_speeds(speeds)
+            
+            # Make sure all joints are stopped
+            real_arm.send_joint_speeds(np.zeros(7))
+            
+        
 
-    # Wait for dt to elapse in real time.
-    # This synchronizes the physics simulation with the rendering rate.
-    gym.sync_frame_time(sim)
+        # step the physics
+        gym.simulate(sim)
+        gym.fetch_results(sim, True)
 
-print('Done')
+        # update the viewer
+        gym.step_graphics(sim)
+        gym.draw_viewer(viewer, sim, True)
 
-real_arm.disconnect()
-gym.destroy_viewer(viewer)
-gym.destroy_sim(sim)
+        # Wait for dt to elapse in real time.
+        # This synchronizes the physics simulation with the rendering rate.
+        gym.sync_frame_time(sim)
+
+    print('Done')
+
+    real_arm.disconnect()
+    gym.destroy_viewer(viewer)
+    gym.destroy_sim(sim)
+
+
+if __name__ == '__main__':
+    main()

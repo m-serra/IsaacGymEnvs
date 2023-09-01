@@ -50,6 +50,7 @@ from .seed_grasp import SeedGrasp
 from .task_grasp import TaskGrasp
 from .qbhand_grasp import SoftGrasp
 from .kinova_sim2real import KinovaTest
+from .kinova_sim2real_joint_velocity import KinovaTestJointVelocity
 
 # Mappings from strings to environments
 isaacgym_task_map = {
@@ -76,4 +77,5 @@ isaacgym_task_map = {
     "TaskGrasp": TaskGrasp,
     "SoftGrasp": SoftGrasp,
     "KinovaTest": KinovaTest,
+    "KinovaTestJointVelocity": KinovaTestJointVelocity,
 }

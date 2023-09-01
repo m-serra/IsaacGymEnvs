@@ -108,7 +108,28 @@ class KinovaArm:
             print (finished)
             if not finished:
                 print("Timeout on action notification wait")
-    
+
+    def send_joint_speeds(self, speeds):
+        """
+        Speeds in deg/sec
+        """
+        # Manel: fix this if
+        if str(self.base.GetServoingMode()) != "SINGLE_LEVEL_SERVOING":
+            base_servo_mode = Base_pb2.ServoingModeInformation()
+            base_servo_mode.servoing_mode = Base_pb2.SINGLE_LEVEL_SERVOING
+            self.base.SetServoingMode(base_servo_mode)
+        
+        joint_speeds = Base_pb2.JointSpeeds()
+        i = 0
+        for speed in speeds:
+            joint_speed = joint_speeds.joint_speeds.add()
+            joint_speed.joint_identifier = i 
+            joint_speed.value = speed
+            joint_speed.duration = 0
+            i = i + 1
+        # time.sleep(3)
+        self.base.SendJointSpeedsCommand(joint_speeds)
+
     def move_cartesian_vel(self, cartesian_vel, blocking=True):
         #assert len(joint_positions) == self.num_joints
         #print ('Setting joints to: ', joint_positions)

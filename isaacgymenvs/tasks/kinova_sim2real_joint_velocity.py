@@ -1,25 +1,165 @@
-import numpy as np
 import os
-import torch
-
+import math
+import numpy as np
+import random
 from isaacgym import gymtorch
 from isaacgym import gymapi
-from isaacgym import gymutil
-from isaacgym.torch_utils import *
+from isaacgym.gymutil import AxesGeometry
+from isaacgym.gymutil import draw_lines
+from isaacgym.torch_utils import tf_vector, quat_conjugate
+from isaacgym.torch_utils import quat_mul, to_torch, tensor_clamp
 
-from isaacgymenvs.utils.torch_jit_utils import *
+from isaacgymenvs.utils.torch_jit_utils import unscale_transform
 from isaacgymenvs.tasks.base.vec_task import VecTask
-from isaacgymenvs.tasks.grasp_sampler import load_model, GraspModel
+# from isaacgymenvs.tasks.grasp_sampler import load_model, GraspModel
 
-from scipy.interpolate import interp1d
-import matplotlib.pyplot as plt
+
+# from scipy.interpolate import interp1d
+# import matplotlib.pyplot as plt
 
 import threading
 import time
 
-from isaacgymenvs.tasks.kinova import KinovaArm, MoveJController, DeviceConnection
+# from isaacgymenvs.kinova_scripts.sim2real_joint_velocity_control import get_direction_and_refine_target_360
+# from isaacgymenvs.kinova_scripts.sim2real_joint_velocity_control import get_direction_and_refine_target_bounded
 
-class KinovaTest(VecTask):
+from isaacgymenvs.tasks.kinova import KinovaArm # , MoveJController, DeviceConnection
+
+import torch
+
+
+def center_angles_at_360(x):
+    return (x + 360) % 360
+
+
+def sim2real_joints(sim_angles):
+    ranges = np.array([[-math.pi, math.pi, -180, 180],
+                       [-2.41, 2.41, -128.93, 128.93],
+                       [-math.pi, math.pi, -180, 180],
+                       [-2.66, 2.66, -147.83, 147.83],
+                       [-math.pi, math.pi, -180, 180],
+                       [-2.23, 2.23, -120.32, 120.32],
+                       [-math.pi, math.pi, -180, 180]])
+
+    real_angles = torch.zeros_like(sim_angles)
+    for i in range(real_angles.shape[0]):
+        x = remap(sim_angles[i], ranges[i][0], ranges[i][1], ranges[i][2], ranges[i][3])
+        if i in [0, 2, 4, 6]: x = x % 360
+        x = center_angles_at_360(x)
+        real_angles[i] = x
+
+    return real_angles
+
+
+def center_angles_at_0(x, angle_range):
+    new_x = (x + angle_range) % 360 - angle_range
+    assert abs(new_x) <= angle_range, "x is outside the angle range"
+    return new_x
+
+
+def real2sim_joints(real_angles):
+    ranges = np.array([[-math.pi, math.pi, -180, 180],
+                       [-2.41, 2.41, -128.93, 128.93],
+                       [-math.pi, math.pi, -180, 180],
+                       [-2.66, 2.66, -147.83, 147.83],
+                       [-math.pi, math.pi, -180, 180],
+                       [-2.23, 2.23, -120.32, 120.32],
+                       [-math.pi, math.pi, -180, 180]])
+    
+    sim_angles = torch.zeros_like(real_angles)
+    for i in range(sim_angles.shape[0]):
+        real_angles[i] = center_angles_at_0(real_angles[i], angle_range=ranges[i][3])
+        x = remap(real_angles[i], ranges[i][2], ranges[i][3], ranges[i][0], ranges[i][1])
+        sim_angles[i] = x
+    return sim_angles
+
+
+def shift_angle(angle, shift):
+    """
+    To use for bounded joints.
+    These joints operate in angles centered at 0/360 (e.g. 280 to 70)
+    This makes computing difference between angles tricky, so this function
+    rotates all angles so that the bounds don't cross the 0 to 360 frontier. 
+    """
+    if angle <= shift:
+        # return angle + shift
+        return (angle + shift) % 360
+    elif angle >= (360-shift):
+        return angle - (360-shift)
+        return (angle - (360-shift)) % 360
+    exit(0) # if it get's here there's a bug
+
+
+def get_direction_and_refine_target_bounded(current_angle, target_angle, angle_width):
+
+    if target_angle == 0:
+        if current_angle >= (360 - angle_width):
+            direction = 1
+            target_angle = 360 
+        else:
+            direction = -1
+    elif target_angle == 360:
+        if current_angle <= angle_width:
+            direction = -1
+            target_angle = 0
+        else:
+            direction = 1
+    else:
+        # print("Current_angle:", current_angle)
+        current_shifted = shift_angle(current_angle, angle_width)
+        # print("Current shifted:", current_shifted)
+        target_shifted = shift_angle(target_angle, angle_width)
+        # print("Target shifted:", target_shifted)
+        diff = current_shifted - target_shifted
+        direction = -1 if diff >= 0 else 1
+        
+    return direction, target_angle
+
+
+def get_direction_and_refine_target_360(current_angle, target_angle):
+    """
+    Determines the rotation direction that leads to a shorter movement to the target.
+    If the target angle is in the transition, we refine it according to the
+    direction, to avoid jumps from 0 to 360 and vice-versa
+    """
+    if target_angle == 0:
+        if current_angle == 0 or current_angle == 360:
+            direction = 0
+        elif current_angle <= 180:
+            direction = -1
+        else:
+            direction = 1
+            target_angle = 360 
+    elif target_angle == 360:
+        if current_angle == 0 or current_angle == 360:
+            direction = 0
+        if current_angle >= 180:
+            direction = 1
+        else:
+            direction = -1
+            target_angle = 0
+    else:
+        diff = current_angle - target_angle
+        if diff < -180:
+            direction = -1
+        elif diff < 0:
+            direction = 1
+        elif diff > 180:
+            direction = 1
+        else: # diff in [0, 180]
+            direction = -1
+    return direction, target_angle
+
+
+def compute_true_angle_diff(current_angle, target_angle):
+    """
+    Compute angle difference discounting crossing 0/360
+    E.g.: Difference between 5deg and 355deg should be 10def, not 350deg.
+    """
+    return abs(shift_angle(current_angle, shift=180) - shift_angle(target_angle, shift=180))
+
+
+class KinovaTestJointVelocity(VecTask):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         self.cfg = cfg
 
@@ -46,8 +186,7 @@ class KinovaTest(VecTask):
 
         # Arm controller type
         self.arm_control_type = self.cfg["env"]["armControlType"]
-        assert self.arm_control_type in {"osc", "pos"},\
-            "Invalid control type specified. Must be one of: {osc, pos}"
+        assert self.arm_control_type in {"osc", "pos"},"Invalid control type specified. Must be one of: {osc, pos}"
 
         # Hand controller type
         # self.hand_control_type = self.cfg["env"]["handControlType"]
@@ -126,17 +265,17 @@ class KinovaTest(VecTask):
         self.kd_null = 2 * torch.sqrt(self.kp_null)
 
         # Set control limits
-        self.cmd_limit = to_torch([0.1, 0.1, 0.1, 0.5, 0.5, 0.5], device=self.device).unsqueeze(0) if \
-        self.arm_control_type == "osc" else self._robot_effort_limits[:7].unsqueeze(0)
+        if self.arm_control_type == "osc":
+            self.cmd_limit = to_torch([0.1, 0.1, 0.1, 0.5, 0.5, 0.5], device=self.device).unsqueeze(0)
+        else:
+            self._robot_effort_limits[:7].unsqueeze(0)
 
         # if self.hand_control_type == "synergy":
         #     self.synergy_model = load_model('tasks/grasp_sampler', GraspModel)
 
-        self.axes_geom = gymutil.AxesGeometry(0.2)
+        self.axes_geom = AxesGeometry(0.2)
         
-        # print ('\n\n\n\n')
         self.real_arm = KinovaArm()
-        # print ('\n\n\n\n')
 
         # Reset all environments
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
@@ -304,8 +443,8 @@ class KinovaTest(VecTask):
         self.grasp_up_axis = to_torch([0, 0, 1], device=self.device).repeat((self.num_envs, 1))
 
         # self.target_pose = random_pos(self.num_envs, self.device)
-        pose = torch.tensor([0.4, 0.4, 0.3]).to(self.device)
-        # pose = torch.tensor([0.58, 0.01, 0.434]).to(self.device)
+        # pose = torch.tensor([0.4, 0.4, 0.3]).to(self.device)
+        pose = torch.tensor([0.58, 0.01, 0.434]).to(self.device)
         self.target_pose = pose.repeat(self.num_envs, 1)
 
     def _update_states(self):
@@ -349,8 +488,10 @@ class KinovaTest(VecTask):
 
         self.timer = 0
 
+        # if self.cfg.test:
         # self.real_arm.zero(blocking=True)
         # self.real_arm.hom(blocking=True)
+
         default_angles = sim2real_joints(self.robot_default_dof_pos)
         self.real_arm.move_angular(default_angles)
         
@@ -418,7 +559,6 @@ class KinovaTest(VecTask):
     def pre_physics_step(self, actions):
         self.actions = actions.clone().to(self.device)
         
-
         # Split arm and gripper command
         if self.arm_control_type == "osc":
             # u_arm, u_hand = self.actions[:, :6], self.actions[:, 6:]
@@ -444,53 +584,47 @@ class KinovaTest(VecTask):
             
             #if self.timer % 15 == 0 and self.timer > 1:
             if self.timer > 1:
-                print ()
-                old_pose = self.real_arm.get_tool_pose()
+
+                max_speed = 80  # deg/sec
+                stop_condition = 0.05 # 0.02  # difference in deg between target & real
+                angle_width = [360, 128.93, 360, 147.83, 360, 120.32, 360]
+
+                # Angles in [0:360] with transition at 9 o'clock
                 
-                old_pos = torch.tensor([[old_pose[0][0], 
-                                         old_pose[0][1],
-                                         old_pose[0][2]]])
+                agent_idx = 0
+                # agent_idx = random.randint(0, 1024)
+                sim_joint_angles = sim2real_joints(self.states["q_arm"][agent_idx]).cpu().numpy()
+                real_joint_angles = self.real_arm.get_joint_angles()
                 
-                print (f"Old pos: {old_pos[0]}")
-                print (f"New pos: {self.new_pos[0]}")
-
-                vel = torch.zeros((6,))
-                vel[0] = self.new_pos[0][1] - old_pos[0][1]
-                vel[1] = self.new_pos[0][2] - old_pos[0][2]
-                vel[2] = self.new_pos[0][0] - old_pos[0][0]
-
-                old_rot = torch.tensor([old_pose[1][0], 
-                                         old_pose[1][1],
-                                         old_pose[1][2]])
-        
-                new_rot_zyx = gymapi.Quat(self.new_rot[0][0],
-                                          self.new_rot[0][1], 
-                                          self.new_rot[0][2],
-                                          self.new_rot[0][3]).to_euler_zyx()
-
-                new_rot_zyx = torch.tensor(new_rot_zyx) * (180. / 3.1415927410125732)
-
-                new_rot_xyz = new_rot_zyx.flip(0)
-                # print (f"Old rot: {old_rot}")
-                # print (f"New rot: {new_rot_xyz}")                
+                # current_diffs = abs(sim_joint_angles - real_joint_angles)
+                current_diffs = [compute_true_angle_diff(sim_joint_angles[i], real_joint_angles[i])for i in range(self.real_arm.num_joints)]
+                # print("Current_difs:", current_diffs[joint_idx])
                 
-                vel[3] = new_rot_xyz[0] - old_rot[0]
-                vel[4] = new_rot_xyz[2] - old_rot[2]
-                vel[5] = new_rot_xyz[1] - old_rot[1]
+                speeds = np.zeros(7)
                 
-                # print(f"Vel: {vel}")
+                for i in range(self.real_arm.num_joints):
 
-                #self.real_arm.move_cartesian_vel(vel, blocking=False)
-                # print (self.states['q_arm'])
-                #if self.timer > 15:
-                #    vel = [0, 0, 0]
-                #    self.real_arm.move_cartesian_vel(vel, blocking=False)
-                #    exit()
-                #self.real_arm.move_angular(real_angles, blocking=True)
-                #print (u_arm[0].cpu().tolist())
-                #print (real_angles)
-                #self.real_arm.move_angular(real_angles, blocking=False)
-            
+                    # if i != joint_idx:  # safety guard to move only one joint during development
+                    #     continue
+
+                    target_angle = center_angles_at_360(sim_joint_angles[i])
+                    
+                    if angle_width[i] == 360:
+                        direction, sim_joint_angles[i] = get_direction_and_refine_target_360(real_joint_angles[i], target_angle)
+                    else:
+                        direction, sim_joint_angles[i] = get_direction_and_refine_target_bounded(real_joint_angles[i], target_angle, angle_width[i])
+
+                    if current_diffs[i] <= stop_condition:
+                        speeds[i] = 0.0
+                    elif current_diffs[i] > max_speed:
+                        speeds[i] = direction * max_speed
+                    else:
+                        speeds[i] = direction * current_diffs[i]
+
+                print("Pose:", self.real_arm.get_tool_pose()[0])
+                print("Speed:", speeds, "\n")
+                self.real_arm.send_joint_speeds(speeds)
+
             #time.sleep(0.1)
 
             self._pos_control = u_arm 
@@ -517,28 +651,9 @@ class KinovaTest(VecTask):
                 env = self.envs[i]
                 pose = self.target_pose[i]
                 tpose = get_transform(pose)
-                gymutil.draw_lines(self.axes_geom, self.gym, self.viewer, env, tpose)
+                draw_lines(self.axes_geom, self.gym, self.viewer, env, tpose)
         # print ('POST')
 
-def remap(value, low1=-3.14, high1=3.14, low2=-180, high2=180):
-    return low2 + (value - low1) * (high2 - low2) / (high1 - low1)
-
-def sim2real_joints(sim_angles):
-    ranges = np.array([[-3.14, 3.14, -180, 180],
-                       [-2.41, 2.41, -128, 128],
-                       [-3.14, 3.14, -180, 180],
-                       [-2.66, 2.66, -147, 147],
-                       [-3.14, 3.14, -180, 180],
-                       [-2.23, 2.23, -120, 120],
-                       [-3.14, 3.14, -180, 180]])
-
-    real_angles = torch.zeros_like(sim_angles)
-    for i in range(real_angles.shape[0]):
-        x = remap(sim_angles[i], ranges[i][0], ranges[i][1], ranges[i][2], ranges[i][3])
-        if i in [0, 2, 4, 6]: x = x % 360
-        real_angles[i] = x
-
-    return real_angles
 
 def get_transform(pose):
     t = gymapi.Transform()
@@ -546,6 +661,7 @@ def get_transform(pose):
     t.p.y = pose[1]
     t.p.z = pose[2]
     return t
+
 #####################################################################
 ###=========================jit functions=========================###
 #####################################################################
@@ -583,8 +699,7 @@ def compute_robot_reward(
     # # Regularization on the actions
     # action_penalty = torch.sum(actions ** 2, dim=-1)
 
-    rewards = reward_settings["r_dist_scale"] * dist_reward \
-            + reward_settings["r_rot_scale"] * rot_reward 
+    rewards = reward_settings["r_dist_scale"] * dist_reward + reward_settings["r_rot_scale"] * rot_reward 
             # + reward_settings["r_fintip_scale"] * fintip_reward \
             # + reward_settings["r_lift_scale"] * lift_reward \
             # + reward_settings["r_lift_height_scale"] * lift_height \
